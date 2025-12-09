@@ -13,10 +13,237 @@ headers = {
     "User-Agent": "Mozilla/5.0 (compatible; INSA-ECTS-Scraper/1.0)"
 }
 
+# Préfixes de codes de départements (à étendre si besoin)
+DEPT_PREFIXES = ["GE", "GM", "GCU", "GI", "MAT", "TC", "BIO"]
 
-# ==========================
-# 1) Récupération de la page catalogue
-# ==========================
+
+# ------------------------------
+#  Utils
+# ------------------------------
+
+def normalize(s: str) -> str:
+    if s is None:
+        return ""
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def parse_hours(line: str) -> str:
+    """
+    Extrait quelque chose comme "12h" depuis une ligne
+    """
+    if line is None:
+        return ""
+    m = re.search(r"(\d+\s*h)", line)
+    return m.group(1).replace(" ", "") if m else ""
+
+
+def guess_year_from_label(label: str) -> str:
+    m = re.search(r"(20\d{2}-20\d{2})", label)
+    return m.group(1) if m else ""
+
+
+def guess_dept_from_label(label: str) -> str:
+    d = label.lower()
+    if "électrique" in d:
+        return "GE"
+    if "mécanique" in d:
+        return "GM"
+    if "civil" in d or "urbain" in d:
+        return "GCU"
+    if "industriel" in d:
+        return "GI"
+    if "matériaux" in d:
+        return "MAT"
+    if "télécommunications" in d or "tc" in d:
+        return "TC"
+    if "biotechnologies" in d:
+        return "BIO"
+    return ""
+
+
+# ------------------------------
+#  Extraction cours depuis un PDF (structure type GE / IF / BIO / etc.)
+# ------------------------------
+
+def extract_courses_from_pdf(label: str, path: str):
+    print(f"[PDF] Extraction depuis : {os.path.basename(path)}")
+    year = guess_year_from_label(label)
+    dept = guess_dept_from_label(label)
+
+    with pdfplumber.open(path) as pdf:
+        text = ""
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text += t + "\n"
+
+    lines = [l.rstrip() for l in text.splitlines()]
+
+    filiere = ""
+    last_nonempty = ""
+    current = None
+    mode = None  # None, "eval", "contact"
+    results = []
+
+    STOP_SECTIONS = {
+        "SUPPORTS",
+        "OBJECTIFS",
+        "MOTS-CLÉS",
+        "MOTS-CLES",
+        "PRÉREQUIS",
+        "PREREQUIS",
+        "CONTENU",
+        "COMPÉTENCES",
+        "COMPETENCES",
+    }
+
+    def push_current():
+        nonlocal current
+        if current is None:
+            return
+        code = current.get("code", "")
+        if not code:
+            return
+
+        # On garde les codes qui correspondent à nos départements
+        if not any(code.startswith(pref + "-") for pref in DEPT_PREFIXES):
+            return
+
+        results.append(current)
+        current = None
+
+    for raw in lines:
+        line = raw.strip()
+        if line:
+            last_nonempty = line
+
+        upper = line.upper()
+
+        # Ligne filière, ex : "Ingénieur, spécialité génie électrique"
+        if "INGÉNIEUR" in upper or "INGENIEUR" in upper:
+            if "SPÉCIALITÉ" in upper or "SPECIALITE" in upper:
+                filiere = line
+                continue
+
+        # Début d'une nouvelle fiche EC
+        if line == "IDENTIFICATION":
+            # Sauvegarde de la fiche précédente
+            push_current()
+
+            current = {
+                "departement": dept,
+                "annee": year,
+                "catalogue_label": label,
+                "fichier_pdf": os.path.basename(path),
+                "filiere": filiere,
+                "code": "",
+                "titre": last_nonempty,  # la ligne juste avant "IDENTIFICATION"
+                "ects": "",
+                "cours_h": "",
+                "td_h": "",
+                "tp_h": "",
+                "projet_h": "",
+                "evaluation_h": "",
+                "face_a_face_h": "",
+                "travail_perso_h": "",
+                "total_h": "",
+                "evaluation_texte": "",
+                "contact": "",
+            }
+            mode = None
+            continue
+
+        # Si on n'est pas dans une fiche, on ignore
+        if current is None:
+            continue
+
+        # ----- Heures / champs simples -----
+
+        # CODE
+        if line.startswith("CODE"):
+            m = re.search(r"CODE\s*:\s*(.+)", line)
+            if m:
+                current["code"] = normalize(m.group(1))
+            continue
+
+        # ECTS
+        if line.startswith("ECTS"):
+            m = re.search(r"ECTS\s*:\s*([\d\.,]+)", line)
+            if m:
+                current["ects"] = m.group(1).replace(",", ".").strip()
+            continue
+
+        # Horaires (HORAIRES)
+        if line.startswith("Cours"):
+            current["cours_h"] = parse_hours(line)
+            continue
+        if line.startswith("TD"):
+            current["td_h"] = parse_hours(line)
+            continue
+        if line.startswith("TP"):
+            current["tp_h"] = parse_hours(line)
+            continue
+        if line.startswith("Projet"):
+            current["projet_h"] = parse_hours(line)
+            continue
+        # Attention : "Evaluation" (heure) vs rubrique "EVALUATION"
+        if line.startswith("Evaluation") or line.startswith("Évaluation"):
+            # Si ce n'est pas la rubrique en majuscules
+            if upper != "EVALUATION":
+                current["evaluation_h"] = parse_hours(line)
+                continue
+
+        if line.startswith("Face à face pédagogique") or line.startswith("Face-à-face pédagogique"):
+            current["face_a_face_h"] = parse_hours(line)
+            continue
+        if line.startswith("Travail personnel"):
+            current["travail_perso_h"] = parse_hours(line)
+            continue
+        if line.startswith("Total"):
+            current["total_h"] = parse_hours(line)
+            continue
+
+        # ----- Rubrique EVALUATION (texte) -----
+        if upper == "EVALUATION":
+            mode = "eval"
+            continue
+
+        # ----- Rubrique CONTACT -----
+        if upper == "CONTACT":
+            mode = "contact"
+            continue
+
+        # Fin d'une rubrique (EVAL / CONTACT) dès qu'on tombe sur un nouveau bloc
+        if upper in STOP_SECTIONS:
+            mode = None
+            continue
+
+        # Contenu des rubriques
+        if mode == "eval":
+            if line:
+                if current["evaluation_texte"]:
+                    current["evaluation_texte"] += " "
+                current["evaluation_texte"] += line
+            continue
+
+        if mode == "contact":
+            if line:
+                if current["contact"]:
+                    current["contact"] += " "
+                current["contact"] += line
+            continue
+
+    # Pousser la dernière fiche éventuelle
+    push_current()
+
+    print(f"[PDF] {len(results)} fiches extraites")
+    return results
+
+
+# ------------------------------
+#  1) Scraper la page catalogue
+# ------------------------------
+
 resp = requests.get(CATALOGUE_URL, headers=headers)
 print("Status code:", resp.status_code)
 print("URL finale:", resp.url)
@@ -27,9 +254,10 @@ print("Page catalogue récupérée ✅")
 print("Titre:", soup.title.text)
 print()
 
-# ==========================
-# 2) Récupérer les pages des formations ingénieur
-# ==========================
+# ------------------------------
+#  2) Récupérer les pages des formations ingénieur
+# ------------------------------
+
 formation_urls = []
 
 for a in soup.find_all("a", href=True):
@@ -52,9 +280,10 @@ for url in formation_urls:
     print(" -", url)
 print()
 
-# ==========================
-# 3) Parcourir chaque page de formation et récupérer les PDF
-# ==========================
+# ------------------------------
+#  3) Trouver les PDF "Catalogue ..."
+# ------------------------------
+
 catalogue_pdfs = []
 
 for url in formation_urls:
@@ -80,12 +309,12 @@ for text, pdf_url in catalogue_pdfs:
 print(f"\nTotal PDF trouvés : {len(catalogue_pdfs)}")
 print()
 
-# ==========================
-# 4) Téléchargement des PDF dans ./pdf_insa
-# ==========================
-os.makedirs("pdf_insa", exist_ok=True)
+# ------------------------------
+#  4) Télécharger les PDF dans ./pdf_insa
+# ------------------------------
 
-local_pdfs = []  # (label, local_path)
+os.makedirs("pdf_insa", exist_ok=True)
+local_pdfs = []
 
 for label, url in catalogue_pdfs:
     filename = url.split("/")[-1]
@@ -104,136 +333,43 @@ for label, url in catalogue_pdfs:
 
 print("\nTous les PDF sont téléchargés ✅\n")
 
-
-# ==========================
-# 5) Extraction des ECTS avec pdfplumber
-# ==========================
-
-def normalize(s):
-    if s is None:
-        return ""
-    return re.sub(r"\s+", " ", s).strip()
-
-def guess_year_from_label(label: str) -> str:
-    m = re.search(r"(20\d{2}-20\d{2})", label)
-    return m.group(1) if m else ""
-
-def guess_dept_from_label(label: str) -> str:
-    # ultra simple, tu peux affiner au besoin
-    d = label.lower()
-    if "électrique" in d:
-        return "GE"
-    if "mécanique" in d:
-        return "GM"
-    if "civil" in d:
-        return "GCU"
-    if "industriel" in d:
-        return "GI"
-    if "matériaux" in d:
-        return "MAT"
-    if "télécommunications" in d or "tc" in d:
-        return "TC"
-    if "biotechnologies" in d:
-        return "BIO"
-    return ""
-
-
-def extract_ects_from_pdf(label, path):
-    print(f"Extraction depuis : {path}")
-    results = []
-    year = guess_year_from_label(label)
-    dept = guess_dept_from_label(label)
-
-    with pdfplumber.open(path) as pdf:
-        for page_num, page in enumerate(pdf.pages, start=1):
-            try:
-                tables = page.extract_tables()
-            except Exception as e:
-                print(f"  [!] Erreur extraction tables page {page_num}: {e}")
-                continue
-
-            if not tables:
-                continue
-
-            for table in tables:
-                if not table or len(table) < 2:
-                    continue
-
-                header = [normalize(c) for c in table[0]]
-                # Chercher les colonnes qui nous intéressent
-                idx_ects = None
-                idx_code = None
-                idx_title = None
-
-                for i, col in enumerate(header):
-                    low = col.lower()
-                    if "ects" in low:
-                        idx_ects = i
-                    if "code" in low or "ec" == low.lower():
-                        idx_code = i
-                    if ("intitulé" in low) or ("titre" in low) or ("libellé" in low):
-                        idx_title = i
-
-                # Si pas de colonne ECTS, cette table ne nous intéresse pas
-                if idx_ects is None:
-                    continue
-
-                # fallback au cas où
-                if idx_title is None and len(header) >= 2:
-                    idx_title = 1
-
-                for row in table[1:]:
-                    if row is None or all(c is None for c in row):
-                        continue
-
-                    # sécuriser les indices
-                    ects_val = normalize(row[idx_ects]) if idx_ects < len(row) else ""
-                    if ects_val == "":
-                        continue
-
-                    code_val = normalize(row[idx_code]) if idx_code is not None and idx_code < len(row) else ""
-                    title_val = normalize(row[idx_title]) if idx_title is not None and idx_title < len(row) else ""
-
-                    # Nettoyage ECTS -> float ou texte brut
-                    ects_clean = ects_val.replace(",", ".")
-                    try:
-                        ects_float = float(re.findall(r"[\d\.]+", ects_clean)[0])
-                    except Exception:
-                        ects_float = None
-
-                    results.append({
-                        "departement": dept,
-                        "annee": year,
-                        "catalogue_label": label,
-                        "fichier_pdf": os.path.basename(path),
-                        "page": page_num,
-                        "code": code_val,
-                        "titre": title_val,
-                        "ects": ects_float if ects_float is not None else ects_val,
-                    })
-
-    print(f"  -> {len(results)} lignes extraites\n")
-    return results
-
+# ------------------------------
+#  5) Extraction de toutes les fiches
+# ------------------------------
 
 all_rows = []
+
 for label, path in local_pdfs:
-    rows = extract_ects_from_pdf(label, path)
+    rows = extract_courses_from_pdf(label, path)
     all_rows.extend(rows)
 
-# ==========================
-# 6) Sauvegarde dans ects_insa.csv
-# ==========================
+print(f"Total global de fiches extraites : {len(all_rows)}")
+
+# ------------------------------
+#  6) Sauvegarde CSV
+# ------------------------------
+
 output_csv = "ects_insa.csv"
+
 fieldnames = [
     "departement",
     "annee",
     "catalogue_label",
     "fichier_pdf",
-    "page",
+    "filiere",
     "code",
     "titre",
     "ects",
+    "cours_h",
+    "td_h",
+    "tp_h",
+    "projet_h",
+    "evaluation_h",
+    "face_a_face_h",
+    "travail_perso_h",
+    "total_h",
+    "evaluation_texte",
+    "contact",
 ]
 
 with open(output_csv, "w", newline="", encoding="utf-8") as f:
