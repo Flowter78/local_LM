@@ -14,4 +14,3 @@ soup = BeautifulSoup(resp.text, "html.parser")
 
 print("Page récupérée ✅")
 print("Titre:", soup.title.text)
-print("Titre:", soup.ti)
