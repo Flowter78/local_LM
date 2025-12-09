@@ -61,6 +61,19 @@ def guess_dept_from_label(label: str) -> str:
     return ""
 
 
+def guess_niveau_from_code(code: str) -> str:
+    """
+    Déduit 3A / 4A / 5A à partir du code EC.
+    Exemple : GE-3-S1-EC-MA1 -> 3A
+    """
+    if not code:
+        return ""
+    m = re.search(r"-([345])-", code)
+    if m:
+        return f"{m.group(1)}A"
+    return ""
+
+
 # ------------------------------
 #  Extraction cours depuis un PDF (structure type GE / IF / BIO / etc.)
 # ------------------------------
@@ -109,6 +122,9 @@ def extract_courses_from_pdf(label: str, path: str):
         if not any(code.startswith(pref + "-") for pref in DEPT_PREFIXES):
             return
 
+        # Deviner le niveau (3A / 4A / 5A) à partir du code
+        current["niveau"] = guess_niveau_from_code(code)
+
         results.append(current)
         current = None
 
@@ -136,6 +152,7 @@ def extract_courses_from_pdf(label: str, path: str):
                 "catalogue_label": label,
                 "fichier_pdf": os.path.basename(path),
                 "filiere": filiere,
+                "niveau": "",
                 "code": "",
                 "titre": last_nonempty,  # la ligne juste avant "IDENTIFICATION"
                 "ects": "",
@@ -357,6 +374,7 @@ fieldnames = [
     "catalogue_label",
     "fichier_pdf",
     "filiere",
+    "niveau",
     "code",
     "titre",
     "ects",
