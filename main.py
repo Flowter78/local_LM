@@ -74,6 +74,20 @@ def guess_niveau_from_code(code: str) -> str:
     return ""
 
 
+def clean_pdf_garbage(txt: str) -> str:
+    """
+    Nettoyage léger des caractères bizarres issus de certains PDF.
+    (Tu peux enrichir si besoin.)
+    """
+    if not txt:
+        return ""
+    # caractères invisibles / remplacement basique
+    txt = txt.replace("\x00", "")
+    txt = txt.replace("\uFFFD", "")  # �
+    txt = txt.replace("", "")       # cas rencontré parfois
+    return txt.strip()
+
+
 # ------------------------------
 #  Extraction cours depuis un PDF (structure type GE / IF / BIO / etc.)
 # ------------------------------
@@ -83,6 +97,7 @@ def extract_courses_from_pdf(label: str, path: str):
     year = guess_year_from_label(label)
     dept = guess_dept_from_label(label)
 
+    # 1) Extraction texte brut
     with pdfplumber.open(path) as pdf:
         text = ""
         for page in pdf.pages:
@@ -95,20 +110,50 @@ def extract_courses_from_pdf(label: str, path: str):
     filiere = ""
     last_nonempty = ""
     current = None
-    mode = None  # None, "eval", "contact"
+    mode = None  # None, "eval", "contact", "objectifs", "programme", "bibliographie", "pre_requis"
     results = []
 
-    STOP_SECTIONS = {
+    # Titres de sections qu'on veut capter (et variantes)
+    SECTION_ALIASES = {
+        "EVALUATION": "eval",
+        "CONTACT": "contact",
+        "OBJECTIFS": "objectifs",
+        "PROGRAMME": "programme",
+        "BIBLIOGRAPHIE": "bibliographie",
+
+        # variantes pré-requis
+        "PRÉ-REQUIS": "pre_requis",
+        "PRÉREQUIS": "pre_requis",
+        "PREREQUIS": "pre_requis",
+        "PRE-REQUIS": "pre_requis",
+        "PRE REQUIS": "pre_requis",
+    }
+
+    # Headers qui indiquent qu'on change de bloc => on stoppe le "mode" en cours
+    STOP_HEADERS = {
+        "IDENTIFICATION",
+        "HORAIRES",
         "SUPPORTS",
-        "OBJECTIFS",
+        "SUPPORTS PEDAGOGIQUES",
+        "SUPPORTS PÉDAGOGIQUES",
+        "LANGUE",
+        "LANGUE D'ENSEIGNEMENT",
         "MOTS-CLÉS",
         "MOTS-CLES",
-        "PRÉREQUIS",
-        "PREREQUIS",
-        "CONTENU",
         "COMPÉTENCES",
         "COMPETENCES",
+        "CONTENU",
     }
+
+    def append_block(field: str, txt: str):
+        txt = clean_pdf_garbage(txt)
+        if not txt:
+            return
+        # On garde des retours à la ligne (plus lisible pour listes / paragraphes)
+        if current[field]:
+            current[field] += "\n" + txt
+        else:
+            current[field] = txt
 
     def push_current():
         nonlocal current
@@ -135,7 +180,7 @@ def extract_courses_from_pdf(label: str, path: str):
 
         upper = line.upper()
 
-        # Ligne filière, ex : "Ingénieur, spécialité génie électrique"
+        # Ligne filière, ex : "Ingénieur, spécialité génie industriel"
         if "INGÉNIEUR" in upper or "INGENIEUR" in upper:
             if "SPÉCIALITÉ" in upper or "SPECIALITE" in upper:
                 filiere = line
@@ -155,6 +200,7 @@ def extract_courses_from_pdf(label: str, path: str):
                 "niveau": "",
                 "code": "",
                 "titre": last_nonempty,  # la ligne juste avant "IDENTIFICATION"
+
                 "ects": "",
                 "cours_h": "",
                 "td_h": "",
@@ -164,6 +210,12 @@ def extract_courses_from_pdf(label: str, path: str):
                 "face_a_face_h": "",
                 "travail_perso_h": "",
                 "total_h": "",
+
+                "objectifs": "",
+                "programme": "",
+                "bibliographie": "",
+                "pre_requis": "",
+
                 "evaluation_texte": "",
                 "contact": "",
             }
@@ -174,16 +226,26 @@ def extract_courses_from_pdf(label: str, path: str):
         if current is None:
             continue
 
-        # ----- Heures / champs simples -----
+        # 1) Si on rencontre un titre de section (OBJECTIFS/PROGRAMME/...) => bascule mode
+        if upper in SECTION_ALIASES:
+            mode = SECTION_ALIASES[upper]
+            continue
+
+        # 2) Si on rencontre un header structurant => stoppe capture
+        if upper in STOP_HEADERS:
+            mode = None
+            continue
+
+        # ----- Champs simples (CODE / ECTS / horaires) -----
 
         # CODE
         if line.startswith("CODE"):
-            m = re.search(r"CODE\s*:\s*(.+)", line)
+            m = re.search(r"CODE\s*:\s*([A-Z]{2,4}-[345]-S[12]-EC-[A-Z0-9]+)", line)
             if m:
                 current["code"] = normalize(m.group(1))
             continue
 
-        # ECTS
+        # ECTS (accepte 2, 2.0, 2,5)
         if line.startswith("ECTS"):
             m = re.search(r"ECTS\s*:\s*([\d\.,]+)", line)
             if m:
@@ -203,9 +265,9 @@ def extract_courses_from_pdf(label: str, path: str):
         if line.startswith("Projet"):
             current["projet_h"] = parse_hours(line)
             continue
-        # Attention : "Evaluation" (heure) vs rubrique "EVALUATION"
+
+        # Attention : "Evaluation : 2h" (horaires) vs rubrique "EVALUATION"
         if line.startswith("Evaluation") or line.startswith("Évaluation"):
-            # Si ce n'est pas la rubrique en majuscules
             if upper != "EVALUATION":
                 current["evaluation_h"] = parse_hours(line)
                 continue
@@ -220,34 +282,29 @@ def extract_courses_from_pdf(label: str, path: str):
             current["total_h"] = parse_hours(line)
             continue
 
-        # ----- Rubrique EVALUATION (texte) -----
-        if upper == "EVALUATION":
-            mode = "eval"
-            continue
-
-        # ----- Rubrique CONTACT -----
-        if upper == "CONTACT":
-            mode = "contact"
-            continue
-
-        # Fin d'une rubrique (EVAL / CONTACT) dès qu'on tombe sur un nouveau bloc
-        if upper in STOP_SECTIONS:
-            mode = None
-            continue
-
-        # Contenu des rubriques
+        # ----- Remplissage des blocs selon mode -----
         if mode == "eval":
-            if line:
-                if current["evaluation_texte"]:
-                    current["evaluation_texte"] += " "
-                current["evaluation_texte"] += line
+            append_block("evaluation_texte", line)
             continue
 
         if mode == "contact":
-            if line:
-                if current["contact"]:
-                    current["contact"] += " "
-                current["contact"] += line
+            append_block("contact", line)
+            continue
+
+        if mode == "objectifs":
+            append_block("objectifs", line)
+            continue
+
+        if mode == "programme":
+            append_block("programme", line)
+            continue
+
+        if mode == "bibliographie":
+            append_block("bibliographie", line)
+            continue
+
+        if mode == "pre_requis":
+            append_block("pre_requis", line)
             continue
 
     # Pousser la dernière fiche éventuelle
@@ -386,6 +443,10 @@ fieldnames = [
     "face_a_face_h",
     "travail_perso_h",
     "total_h",
+    "objectifs",
+    "programme",
+    "bibliographie",
+    "pre_requis",
     "evaluation_texte",
     "contact",
 ]

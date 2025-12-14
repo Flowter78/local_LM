@@ -4,8 +4,8 @@ import pandas as pd
 import requests
 
 # --- Config LM Studio ---
-LMSTUDIO_API_URL = "http://10.56.15.4:1234/v1/chat/completions"
-MODEL = "gpt-oss"  # mets ici le nom exact du modèle dans LM Studio
+LMSTUDIO_API_URL = "http://127.0.0.1:1234/v1/chat/completions" #The local server adresse
+MODEL = "gpt-oss-20b"  # le nom exact du modèle dans LM Studio
 
 CSV_PATH = "ects_insa.csv"  # ton fichier généré
 
@@ -120,6 +120,8 @@ def ask(question: str):
 
 
 if __name__ == "__main__":
-    # Exemple d'utilisation
-    question = "combien y'a-t-il de cours disponible en génie électrique ?"
-    ask(question)
+    while True:
+        q = input("\n❓ Question (enter pour quitter) : ")
+        if not q.strip():
+            break
+        ask(q)
