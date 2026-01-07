@@ -17,36 +17,36 @@ def build_filter_from_question(question: str):
     On lui demande un JSON très simple.
     """
     system_prompt = """
-Tu es un assistant qui convertit une question utilisateur en filtres pour un tableau de cours.
+    Tu es un assistant qui convertit une question utilisateur en filtres pour un tableau de cours.
 
-Tu DOIS répondre UNIQUEMENT avec un objet JSON valide, sans texte autour.
+    Tu DOIS répondre UNIQUEMENT avec un objet JSON valide, sans texte autour.
 
-Les colonnes disponibles sont :
-- departement : string, ex "TC", "GE", "GM"
-- niveau : string, ex "3A", "4A", "5A"
-- ects : nombre (float)
+    Les colonnes disponibles sont :
+    - departement : string, ex "TC", "GE", "GM"
+    - niveau : string, ex "3A", "4A", "5A"
+    - ects : nombre (float)
 
-Tu dois renvoyer un JSON de la forme :
-{
-  "departement": "...",      // ou null si pas précisé
-  "niveau": "...",           // ou null si pas précisé
-  "ects_min": nombre ou null // seuil minimum d'ECTS
-}
+    Tu dois renvoyer un JSON de la forme :
+    {
+    "departement": "...",      // ou null si pas précisé
+    "niveau": "...",           // ou null si pas précisé
+    "ects_min": nombre ou null // seuil minimum d'ECTS
+    }
 
-Exemples :
+    Exemples :
 
-Question : "donne-moi tous les cours de 4A TC avec plus de 5 ECTS"
-Réponse :
-{"departement": "TC", "niveau": "4A", "ects_min": 5}
+    Question : "donne-moi tous les cours de 4A TC avec plus de 5 ECTS"
+    Réponse :
+    {"departement": "TC", "niveau": "4A", "ects_min": 5}
 
-Question : "liste tous les cours de 3A en génie électrique"
-Réponse :
-{"departement": "GE", "niveau": "3A", "ects_min": null}
+    Question : "liste tous les cours de 3A en génie électrique"
+    Réponse :
+    {"departement": "GE", "niveau": "3A", "ects_min": null}
 
-Question : "les cours avec au moins 2 ECTS"
-Réponse :
-{"departement": null, "niveau": null, "ects_min": 2}
-"""
+    Question : "les cours avec au moins 2 ECTS"
+    Réponse :
+    {"departement": null, "niveau": null, "ects_min": 2}
+    """
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -121,7 +121,7 @@ def ask(question: str):
 
 if __name__ == "__main__":
     while True:
-        q = input("\n❓ Question (enter pour quitter) : ")
+        q = input("\n Question (enter pour quitter) : ")
         if not q.strip():
             break
         ask(q)
